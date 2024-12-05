@@ -1,0 +1,169 @@
+---
+title:  "STATS 506 HW 6"
+author: "ZHAO Shengchun"
+format: pdf
+editor: visual
+---
+
+## Github URL:
+
+<https://github.com/ZHAOShengchun67734538/STAT-506-HW-6>
+
+## Question 1
+
+```{r}
+library(DBI)
+library(parallel)
+library(future)
+library(data.table)
+
+# Import the database of the Lahman data
+lahman = dbConnect(RSQLite::SQLite(), 
+                   "C:/Users/z1883/Desktop/lahman_1871-2022.sqlite")
+data = dbGetQuery(lahman, "SELECT teamID, PO, A, InnOuts FROM Fielding")
+dim(data)
+class(data)
+head(data)
+
+# Check and delete the NA values of PO, A, and INNOUT
+sum(is.na(data$PO))
+sum(is.na(data$A))
+sum(is.na(data$InnOuts))
+```
+
+```{r}
+# Delete the NA values
+data = data[!is.na(data$InnOuts), ]
+
+# Check and delete the 0 values of INNOUT
+nrow(data[which(data$InnOuts == 0),])
+
+data = data[-which(data$InnOuts == 0),]
+dim(data)
+```
+
+**(a)**
+
+**Calculate the average RF for each team in the Fielding table.**
+
+```{r}
+# Calculate the average RF for each team in the Fielding table.
+data$RF = 3*(data$PO+data$A)/data$InnOuts
+
+### Calculate the estimate RF value ###
+mean_RF = aggregate(data$RF,
+                    by = list(data$teamID),
+                    FUN = mean, na.rm = TRUE)
+# Show the first ten highest RF 
+head(mean_RF[order(mean_RF$x, decreasing = TRUE),], n=10L)
+
+```
+
+```{r}
+# Use data.table to do the bootstrap
+rfdata = data.table(data)
+
+#' stratify bootstrap function
+#'
+#' @param dat the data which have the RF values and team ID
+#'
+#' @return a stratified bootstrap sample
+stra_boostrap = function(dat)
+{
+  resamp = dat[, .SD[sample(x = .N, size = .N, replace = TRUE)], 
+                 by = teamID]
+  result = resamp[, .(mean(RF, na.rm = TRUE)), by = teamID]
+  return(result)
+}
+
+# Do a test to verify
+# Make sure sampling was done within team ID
+d = stra_boostrap(rfdata)
+d = as.data.frame(d)
+identical((sort(d$teamID)), (sort(mean_RF$Group.1)))
+```
+
+```{r}
+# Determine the sample size
+size = 1000
+```
+
+Because the bootstrap sample is too large, so, in the quarto file, we only show the system time instead of the whole sample!
+
+**1, Without using Parallel**
+
+```{r}
+# Without any parallel processing
+system.time({
+  s1 = lapply(seq_len(size),
+                 function(x) stra_boostrap(rfdata))
+})
+
+```
+
+**2, Using parLapply**
+
+```{r}
+# Use parLapply
+system.time({
+  cl = makeCluster(6)
+  clusterEvalQ(cl, library(data.table))
+  clusterExport(cl, varlist = c("stra_boostrap", "rfdata"))
+  s2 = parLapply(cl, seq_len(size), 
+                 function(x){stra_boostrap(rfdata)})
+})
+stopCluster(cl)
+
+```
+
+**3, Using future**
+
+```{r}
+# Using futures
+plan(multisession)
+system.time({
+  s3 = lapply(seq_len(size),
+                 function(x) {
+                   future(stra_boostrap(rfdata), seed = TRUE)
+                 })
+  s3 = lapply(s3, value)
+})
+```
+
+**(b)**
+
+```{r}
+#' Showing the estimated statistics by decreasing order
+#'
+#' @param d is the bootstrap sample
+#'
+#' @return a table showing the estimated RF and 
+#' associated standard errors 
+#' for the teams with the 10 highest RF.
+stat_table = function(d) {
+  sd = rbindlist(d)[, sd(V1), by=teamID][, V1]
+  team = rbindlist(d)[, sd(V1), by=teamID][, teamID]
+  sd_table = data.frame(Group.1 = team, estimated_sd = sd)
+  result = merge(mean_RF,sd_table, by = "Group.1")
+  colnames(result) = c("teamID","estimated_mean_RF","estimated_sd_RF")
+  result = result[order(result$estimated_mean, decreasing = TRUE),]
+  # Only renturn the top 10 RF values
+  return(result[1:10,])
+}
+```
+
+```{r}
+# without parallel
+stat_table(s1)
+
+# parLapply
+stat_table(s2)
+
+# futures
+stat_table(s3)
+
+```
+
+**(c)**
+
+From the system time, we can find the parLapply using the smallest time, which is much much faster than other two ways; the second is the approach "without using parallel", the method "future" consumes the longest time, which may need to some adjust later. All in all, use the parLapply could save you a lot of time when you are dealing with very large data set.
